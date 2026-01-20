@@ -1,0 +1,7 @@
+streams:
+  tapo1:
+    - rtsp://Admin002:123456789@192.168.100.191:554/stream1
+  tapo2:
+    - rtsp://Admin003:123456789@192.168.100.220:554/stream1
+  tapo3:
+    - rtsp://Admin004:123456789@192.168.100.224:554/stream1
