@@ -21,7 +21,6 @@ services:
       - "8554:8554"
     volumes:
       - cctv_go2rtc_config:/config
-    command: ["-config", "/config/go2rtc.yaml"]
     restart: unless-stopped
 
 volumes:
