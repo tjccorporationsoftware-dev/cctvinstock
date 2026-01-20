@@ -20,9 +20,10 @@ services:
       - "1984:1984"
       - "8554:8554"
     volumes:
-      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+      - cctv_go2rtc_config:/config
     command: ["-config", "/config/go2rtc.yaml"]
     restart: unless-stopped
 
 volumes:
   cctv_recordings:
+  cctv_go2rtc_config:
