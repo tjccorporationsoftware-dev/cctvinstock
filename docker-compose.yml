@@ -1,0 +1,28 @@
+services:
+  api:
+    build: .
+    container_name: cctv-api
+    environment:
+      - NODE_ENV=production
+      - FFMPEG_PATH=ffmpeg
+    ports:
+      - "5000:5000"
+    volumes:
+      - cctv_recordings:/app/recordings
+    restart: unless-stopped
+    depends_on:
+      - go2rtc
+
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: cctv-go2rtc
+    ports:
+      - "1984:1984"
+      - "8554:8554"
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+    command: ["-config", "/config/go2rtc.yaml"]
+    restart: unless-stopped
+
+volumes:
+  cctv_recordings:

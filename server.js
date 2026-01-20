@@ -25,7 +25,7 @@ app.use(express.urlencoded({ extended: true }));
 // CONFIG
 // ===============================
 const PORT = 5000;
-const FFMPEG_PATH = path.join(__dirname, 'ffmpeg.exe');
+const FFMPEG_PATH = process.env.FFMPEG_PATH || 'ffmpeg';
 const RECORD_DIR = path.join(__dirname, 'recordings');
 
 // 🔴 Disk safety (ปรับได้)
@@ -328,6 +328,231 @@ app.get('/api/videos', (req, res) => {
 app.get('/api/recording-status', (req, res) => {
   const recordingCamIds = Object.keys(recordProcesses);
   res.json({ activeCameras, recordingCamIds });
+});
+
+// ===============================
+// ⭐ ALL-IN-ONE SYSTEM CONTROL (เพิ่มใหม่ ไม่แก้ของเดิม)
+// - go2rtc + cloudflared tunnels
+// ===============================
+const GO2RTC_PATH = path.join(__dirname, 'go2rtc.exe');
+const GO2RTC_CONFIG = path.join(__dirname, 'go2rtc.yaml');
+
+const CLOUDFLARED_PATH = path.join(__dirname, 'cloudflared.exe');
+
+const GO2RTC_PORT = 1984;
+const API_PORT = PORT; // 5000 ตามของเดิม
+
+let go2rtcProc = null;
+let tunnelApiProc = null;
+let tunnelCamProc = null;
+
+let tunnelApiUrl = null;
+let tunnelCamUrl = null;
+
+function isProcRunning(p) {
+  return p && !p.killed && p.exitCode === null;
+}
+
+function killProcessTree(proc, name = 'process') {
+  return new Promise((resolve) => {
+    if (!proc || !isProcRunning(proc)) return resolve({ ok: true, msg: `${name} not running` });
+
+    const pid = proc.pid;
+    try {
+      if (process.platform === 'win32') {
+        const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true });
+        killer.on('close', () => resolve({ ok: true, msg: `${name} killed`, pid }));
+      } else {
+        try { process.kill(-pid, 'SIGTERM'); } catch { try { proc.kill('SIGTERM'); } catch {} }
+        setTimeout(() => resolve({ ok: true, msg: `${name} killed`, pid }), 300);
+      }
+    } catch (e) {
+      resolve({ ok: false, msg: `${name} kill failed`, error: String(e), pid });
+    }
+  });
+}
+
+function extractTryCloudflareUrl(text) {
+  const m = String(text).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+  return m ? m[0] : null;
+}
+
+function startGo2rtc() {
+  if (isProcRunning(go2rtcProc)) {
+    return { ok: true, msg: 'go2rtc already running', pid: go2rtcProc.pid };
+  }
+  if (!fs.existsSync(GO2RTC_PATH)) {
+    return { ok: false, msg: `go2rtc.exe not found at ${GO2RTC_PATH}` };
+  }
+  if (!fs.existsSync(GO2RTC_CONFIG)) {
+    return { ok: false, msg: `go2rtc.yaml not found at ${GO2RTC_CONFIG}` };
+  }
+
+  go2rtcProc = spawn(GO2RTC_PATH, ['-config', GO2RTC_CONFIG], {
+    cwd: __dirname,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  go2rtcProc.stdout.on('data', (d) => console.log(`[go2rtc] ${d}`));
+  go2rtcProc.stderr.on('data', (d) => console.error(`[go2rtc err] ${d}`));
+  go2rtcProc.on('close', (code) => {
+    console.log(`[go2rtc] exited with code ${code}`);
+    go2rtcProc = null;
+  });
+
+  return { ok: true, msg: 'go2rtc started', pid: go2rtcProc.pid, port: GO2RTC_PORT };
+}
+
+function startTunnelApi() {
+  if (isProcRunning(tunnelApiProc)) {
+    return { ok: true, msg: 'tunnel-api already running', pid: tunnelApiProc.pid, url: tunnelApiUrl };
+  }
+  if (!fs.existsSync(CLOUDFLARED_PATH)) {
+    return { ok: false, msg: `cloudflared.exe not found at ${CLOUDFLARED_PATH}` };
+  }
+
+  tunnelApiUrl = null;
+  tunnelApiProc = spawn(CLOUDFLARED_PATH, ['tunnel', '--url', `http://localhost:${API_PORT}`], {
+    cwd: __dirname,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  const onData = (d) => {
+    const s = d.toString();
+    const url = extractTryCloudflareUrl(s);
+    if (url) tunnelApiUrl = url;
+    console.log(`[tunnel-api] ${s}`);
+  };
+
+  tunnelApiProc.stdout.on('data', onData);
+  tunnelApiProc.stderr.on('data', (d) => {
+    const s = d.toString();
+    const url = extractTryCloudflareUrl(s);
+    if (url) tunnelApiUrl = url;
+    console.error(`[tunnel-api err] ${s}`);
+  });
+
+  tunnelApiProc.on('close', (code) => {
+    console.log(`[tunnel-api] exited with code ${code}`);
+    tunnelApiProc = null;
+    tunnelApiUrl = null;
+  });
+
+  return { ok: true, msg: 'tunnel-api started', pid: tunnelApiProc.pid, target: `http://localhost:${API_PORT}` };
+}
+
+function startTunnelCam() {
+  if (isProcRunning(tunnelCamProc)) {
+    return { ok: true, msg: 'tunnel-cam already running', pid: tunnelCamProc.pid, url: tunnelCamUrl };
+  }
+  if (!fs.existsSync(CLOUDFLARED_PATH)) {
+    return { ok: false, msg: `cloudflared.exe not found at ${CLOUDFLARED_PATH}` };
+  }
+
+  tunnelCamUrl = null;
+  tunnelCamProc = spawn(CLOUDFLARED_PATH, ['tunnel', '--url', `http://localhost:${GO2RTC_PORT}`], {
+    cwd: __dirname,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  const onData = (d) => {
+    const s = d.toString();
+    const url = extractTryCloudflareUrl(s);
+    if (url) tunnelCamUrl = url;
+    console.log(`[tunnel-cam] ${s}`);
+  };
+
+  tunnelCamProc.stdout.on('data', onData);
+  tunnelCamProc.stderr.on('data', (d) => {
+    const s = d.toString();
+    const url = extractTryCloudflareUrl(s);
+    if (url) tunnelCamUrl = url;
+    console.error(`[tunnel-cam err] ${s}`);
+  });
+
+  tunnelCamProc.on('close', (code) => {
+    console.log(`[tunnel-cam] exited with code ${code}`);
+    tunnelCamProc = null;
+    tunnelCamUrl = null;
+  });
+
+  return { ok: true, msg: 'tunnel-cam started', pid: tunnelCamProc.pid, target: `http://localhost:${GO2RTC_PORT}` };
+}
+
+app.post('/api/system/start', async (req, res) => {
+  const { startTunnels = true } = req.body || {};
+
+  const rGo2 = startGo2rtc();
+
+  await new Promise(r => setTimeout(r, 1500));
+
+  const rTunApi = startTunnels ? startTunnelApi() : { ok: true, msg: 'skip tunnel-api' };
+
+  await new Promise(r => setTimeout(r, 1000));
+
+  const rTunCam = startTunnels ? startTunnelCam() : { ok: true, msg: 'skip tunnel-cam' };
+
+  res.json({
+    ok: true,
+    go2rtc: rGo2,
+    tunnelApi: rTunApi,
+    tunnelCam: rTunCam,
+    note: 'Use GET /api/system/status to see trycloudflare URLs'
+  });
+});
+
+app.post('/api/system/stop', async (req, res) => {
+  const { stopTunnels = true, stopGo2rtc = true } = req.body || {};
+
+  const results = {};
+
+  if (stopTunnels) {
+    results.tunnelApi = await killProcessTree(tunnelApiProc, 'tunnel-api');
+    results.tunnelCam = await killProcessTree(tunnelCamProc, 'tunnel-cam');
+    tunnelApiProc = null;
+    tunnelCamProc = null;
+    tunnelApiUrl = null;
+    tunnelCamUrl = null;
+  } else {
+    results.tunnelApi = { ok: true, msg: 'skip tunnel-api' };
+    results.tunnelCam = { ok: true, msg: 'skip tunnel-cam' };
+  }
+
+  if (stopGo2rtc) {
+    results.go2rtc = await killProcessTree(go2rtcProc, 'go2rtc');
+    go2rtcProc = null;
+  } else {
+    results.go2rtc = { ok: true, msg: 'skip go2rtc' };
+  }
+
+  res.json({ ok: true, results });
+});
+
+app.get('/api/system/status', (req, res) => {
+  res.json({
+    ok: true,
+    api: { port: API_PORT },
+    go2rtc: {
+      running: isProcRunning(go2rtcProc),
+      pid: go2rtcProc?.pid || null,
+      port: GO2RTC_PORT
+    },
+    tunnelApi: {
+      running: isProcRunning(tunnelApiProc),
+      pid: tunnelApiProc?.pid || null,
+      url: tunnelApiUrl,
+      target: `http://localhost:${API_PORT}`
+    },
+    tunnelCam: {
+      running: isProcRunning(tunnelCamProc),
+      pid: tunnelCamProc?.pid || null,
+      url: tunnelCamUrl,
+      target: `http://localhost:${GO2RTC_PORT}`
+    }
+  });
 });
 
 // ===============================
